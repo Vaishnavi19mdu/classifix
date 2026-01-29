@@ -27,8 +27,10 @@ export const VoiceAnalyzerModal: React.FC<VoiceAnalyzerModalProps> = ({ onClose 
   const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [transcription, setTranscription] = useState<string>("");
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const recognitionRef = useRef<any>(null);
 
   const startRecording = async () => {
     try {
@@ -37,19 +39,61 @@ export const VoiceAnalyzerModal: React.FC<VoiceAnalyzerModalProps> = ({ onClose 
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
 
+      // Start speech recognition
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        
+        // Set language based on selection
+        const langMap: Record<string, string> = {
+          "English": "en-US",
+          "Tamil": "ta-IN",
+          "Hindi": "hi-IN",
+          "Malayalam": "ml-IN",
+          "Telugu": "te-IN"
+        };
+        
+        if (selectedLanguage !== "Auto (Detect Automatically)") {
+          recognition.lang = langMap[selectedLanguage] || "en-US";
+        } else {
+          recognition.lang = "en-US"; // Default to English for auto detect
+        }
+
+        let fullTranscript = "";
+        recognition.onresult = (event: any) => {
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            if (event.results[i].isFinal) {
+              fullTranscript += event.results[i][0].transcript + " ";
+            }
+          }
+          setTranscription(fullTranscript.trim());
+        };
+
+        recognition.start();
+        recognitionRef.current = recognition;
+      }
+
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        await analyzeAudio(audioBlob);
+        if (recognitionRef.current) {
+          recognitionRef.current.stop();
+        }
+        // Wait a moment for final transcription
+        setTimeout(() => {
+          analyzeTranscription();
+        }, 500);
       };
 
       mediaRecorder.start();
       setIsRecording(true);
       setError(null);
       setAnalysisResult(null);
+      setTranscription("");
     } catch (err) {
       setError("Microphone access denied or not supported.");
     }
@@ -63,74 +107,92 @@ export const VoiceAnalyzerModal: React.FC<VoiceAnalyzerModalProps> = ({ onClose 
     }
   };
 
-  const analyzeAudio = async (blob: Blob) => {
+  const analyzeTranscription = async () => {
+    if (!transcription || transcription.length < 3) {
+      setError("Could not transcribe audio. Please speak clearly and try again.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
     
     try {
-      // Convert blob to base64
-      const base64Data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const result = reader.result as string;
-          resolve(result.split(',')[1]);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-
-      // Initialize Gemini AI
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY;
       if (!apiKey) {
         throw new Error("API key not configured. Please add VITE_GEMINI_API_KEY to your .env.local file");
       }
 
       const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ 
-        model: "gemini-1.5-flash",
-        generationConfig: {
-          responseMimeType: "application/json"
-        }
-      });
+      
+      // Try all possible model names that might work
+      const modelNames = [
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash",
+        "gemini-flash-1.5",
+        "models/gemini-1.5-flash-latest"
+      ];
+      
+      let model;
+      let lastError;
+      
+      for (const modelName of modelNames) {
+        try {
+          model = genAI.getGenerativeModel({ model: modelName });
+          
+          const langContext = selectedLanguage === "Auto (Detect Automatically)" 
+            ? "Identify the language automatically from the transcription." 
+            : `The user specified ${selectedLanguage} as the language context.`;
 
-      const langContext = selectedLanguage === "Auto (Detect Automatically)" 
-        ? "Identify the language automatically from the audio. The language detection is informational and must not affect the prediction outcome." 
-        : `The user has specified the language context as ${selectedLanguage}. Use this for informational purposes only; the classification must remain language-agnostic.`;
+          const prompt = `You are a voice authenticity analyzer. Based on the following transcribed speech, analyze if it's likely from a real human or AI-generated voice.
 
-      const prompt = `Perform a language-agnostic voice classification. ${langContext} 
-Determine if the audio sounds like a real human or synthetic AI based primarily on acoustic features and neural patterns. 
+Transcription: "${transcription}"
 
-Respond ONLY in JSON format following this exact schema:
+${langContext}
+
+Consider these factors:
+1. Natural speech patterns and conversational flow
+2. Presence of filler words (um, uh, like, you know)
+3. Grammar and structure naturalness
+4. Emotional undertones
+5. Contextual coherence
+
+Respond ONLY in JSON format (no markdown, no code blocks):
 {
   "classification": "AI-generated" or "Human-generated",
   "confidence": <number between 0.0 and 1.0>,
   "language": "Tamil" or "English" or "Hindi" or "Malayalam" or "Telugu" or "Unknown",
-  "explanation": "<string describing the result, referencing the detected language and prosody characteristics>"
+  "explanation": "<string describing your reasoning based on the transcription analysis>"
 }`;
 
-      const result = await model.generateContent([
-        {
-          inlineData: {
-            data: base64Data,
-            mimeType: 'audio/webm'
-          }
-        },
-        { text: prompt }
-      ]);
-
-      const response = await result.response;
-      const text = response.text();
+          const result = await model.generateContent(prompt);
+          const response = await result.response;
+          const text = response.text();
+          
+          const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+          const analysisData = JSON.parse(cleanText) as AnalysisResponse;
+          setAnalysisResult(analysisData);
+          return; // Success! Exit the function
+          
+        } catch (err: any) {
+          console.log(`Model ${modelName} failed, trying next...`);
+          lastError = err;
+          continue;
+        }
+      }
       
-      // Parse JSON response
-      const analysisData = JSON.parse(text) as AnalysisResponse;
-      setAnalysisResult(analysisData);
+      // If we get here, all models failed
+      throw lastError;
       
     } catch (err: any) {
       console.error("Analysis Error:", err);
       if (err.message?.includes("API key")) {
-        setError(err.message);
+        setError("Invalid API key. Please check your .env.local file.");
+      } else if (err.message?.includes("quota")) {
+        setError("API quota exceeded. Please try again later.");
+      } else if (err.message?.includes("not found") || err.message?.includes("404")) {
+        setError("Your API key doesn't have access to Gemini models. Please go to https://aistudio.google.com and enable the Gemini API for your project.");
       } else {
-        setError("AI analysis failed. Please try again. Make sure your audio is clear.");
+        setError("Analysis failed. Error: " + (err.message || "Unknown error"));
       }
     } finally {
       setLoading(false);
@@ -154,12 +216,13 @@ Respond ONLY in JSON format following this exact schema:
                 value={selectedLanguage}
                 onChange={(e) => setSelectedLanguage(e.target.value)}
                 className="w-full bg-[#0b0f14] border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                disabled={isRecording}
               >
                 {SUPPORTED_LANGUAGES.map(lang => (
                   <option key={lang} value={lang}>{lang}</option>
                 ))}
               </select>
-              <p className="text-[10px] text-gray-500 mt-2">Manual selection is informational and won't bias the classification.</p>
+              <p className="text-[10px] text-gray-500 mt-2">Speech recognition helps with analysis accuracy.</p>
             </div>
 
             <div className="text-center py-6">
@@ -178,6 +241,11 @@ Respond ONLY in JSON format following this exact schema:
               <p className="text-gray-400 text-lg px-4">
                 {isRecording ? "Recording... Speak naturally." : "System is ready for language-agnostic detection."}
               </p>
+              {transcription && isRecording && (
+                <div className="mt-4 p-3 bg-white/5 rounded-lg text-sm text-gray-300 max-h-20 overflow-y-auto">
+                  "{transcription}"
+                </div>
+              )}
               {isRecording && <div className="mt-4 flex gap-1 justify-center">
                 {[...Array(5)].map((_, i) => (
                   <div key={i} className="w-1 bg-indigo-500 animate-[wave_1s_infinite]" style={{animationDelay: `${i*0.1}s`, height: `${10 + Math.random()*20}px`}}></div>
@@ -190,7 +258,8 @@ Respond ONLY in JSON format following this exact schema:
         {loading && (
           <div className="text-center py-20">
             <div className="inline-block w-12 h-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-6"></div>
-            <p className="text-gray-300 font-medium">Classiflick AI is analyzing acoustic patterns...</p>
+            <p className="text-gray-300 font-medium">Classiflick AI is analyzing patterns...</p>
+            {transcription && <p className="text-gray-500 text-sm mt-2">Transcription: "{transcription}"</p>}
           </div>
         )}
 
@@ -215,12 +284,20 @@ Respond ONLY in JSON format following this exact schema:
             </div>
 
             <div className="p-4 bg-white/5 rounded-2xl border border-white/10">
+              <div className="text-xs text-gray-500 uppercase font-bold tracking-widest mb-1">Transcription</div>
+              <p className="text-sm text-gray-400 leading-relaxed mt-1">"{transcription}"</p>
+            </div>
+
+            <div className="p-4 bg-white/5 rounded-2xl border border-white/10">
               <div className="text-xs text-gray-500 uppercase font-bold tracking-widest mb-1">Explanation</div>
               <p className="text-sm text-gray-400 leading-relaxed mt-1">{analysisResult.explanation}</p>
             </div>
 
             <button 
-              onClick={() => setAnalysisResult(null)}
+              onClick={() => {
+                setAnalysisResult(null);
+                setTranscription("");
+              }}
               className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition-all active:scale-95"
             >
               Scan Another Voice
@@ -229,7 +306,7 @@ Respond ONLY in JSON format following this exact schema:
         )}
 
         {error && (
-          <div className="mt-4 p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm text-center">
+          <div className="mt-4 p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm">
             {error}
           </div>
         )}
