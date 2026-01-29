@@ -1,23 +1,5 @@
-
-import React, { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI, Type } from "@google/genai";
-
-/**
- * Example Request (Logical):
- * {
- *   audio: <base64_data>,
- *   mimeType: "audio/webm",
- *   prompt: "Perform a language-agnostic voice classification. Identify the language automatically..."
- * }
- * 
- * Example Response (JSON):
- * {
- *   "classification": "Human-generated",
- *   "confidence": 0.985,
- *   "language": "English",
- *   "explanation": "The voice was classified as human-generated with natural prosody and consistent spectral density in English."
- * }
- */
+import React, { useState, useRef } from 'react';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 interface VoiceAnalyzerModalProps {
   onClose: () => void;
@@ -83,62 +65,74 @@ export const VoiceAnalyzerModal: React.FC<VoiceAnalyzerModalProps> = ({ onClose 
 
   const analyzeAudio = async (blob: Blob) => {
     setLoading(true);
+    setError(null);
+    
     try {
-      const reader = new FileReader();
-      reader.readAsDataURL(blob);
-      reader.onloadend = async () => {
-        const base64Data = (reader.result as string).split(',')[1];
-        
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        
-        const langContext = selectedLanguage === "Auto (Detect Automatically)" 
-          ? "Identify the language automatically from the audio. The language detection is informational and must not affect the prediction outcome." 
-          : `The user has specified the language context as ${selectedLanguage}. Use this for informational purposes only; the classification must remain language-agnostic.`;
+      // Convert blob to base64
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const result = reader.result as string;
+          resolve(result.split(',')[1]);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
 
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  data: base64Data,
-                  mimeType: 'audio/webm',
-                },
-              },
-              {
-                text: `Perform a language-agnostic voice classification. ${langContext} 
-                Determine if the audio sounds like a real human or synthetic AI based primarily on acoustic features and neural patterns. 
-                
-                Respond ONLY in JSON format following this exact schema:
-                - classification: Must be exactly "AI-generated" or "Human-generated".
-                - confidence: A number between 0.0 and 1.0 representing the model's certainty.
-                - language: Must be one of "Tamil", "English", "Hindi", "Malayalam", "Telugu", or "Unknown".
-                - explanation: A string describing the result, referencing the detected language and prosody characteristics.`,
-              },
-            ],
-          },
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                classification: { type: Type.STRING },
-                confidence: { type: Type.NUMBER },
-                language: { type: Type.STRING },
-                explanation: { type: Type.STRING },
-              },
-              required: ["classification", "confidence", "language", "explanation"]
-            }
+      // Initialize Gemini AI
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("API key not configured. Please add VITE_GEMINI_API_KEY to your .env.local file");
+      }
+
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ 
+        model: "gemini-1.5-flash",
+        generationConfig: {
+          responseMimeType: "application/json"
+        }
+      });
+
+      const langContext = selectedLanguage === "Auto (Detect Automatically)" 
+        ? "Identify the language automatically from the audio. The language detection is informational and must not affect the prediction outcome." 
+        : `The user has specified the language context as ${selectedLanguage}. Use this for informational purposes only; the classification must remain language-agnostic.`;
+
+      const prompt = `Perform a language-agnostic voice classification. ${langContext} 
+Determine if the audio sounds like a real human or synthetic AI based primarily on acoustic features and neural patterns. 
+
+Respond ONLY in JSON format following this exact schema:
+{
+  "classification": "AI-generated" or "Human-generated",
+  "confidence": <number between 0.0 and 1.0>,
+  "language": "Tamil" or "English" or "Hindi" or "Malayalam" or "Telugu" or "Unknown",
+  "explanation": "<string describing the result, referencing the detected language and prosody characteristics>"
+}`;
+
+      const result = await model.generateContent([
+        {
+          inlineData: {
+            data: base64Data,
+            mimeType: 'audio/webm'
           }
-        });
+        },
+        { text: prompt }
+      ]);
 
-        const result = JSON.parse(response.text || '{}') as AnalysisResponse;
-        setAnalysisResult(result);
-        setLoading(false);
-      };
-    } catch (err) {
+      const response = await result.response;
+      const text = response.text();
+      
+      // Parse JSON response
+      const analysisData = JSON.parse(text) as AnalysisResponse;
+      setAnalysisResult(analysisData);
+      
+    } catch (err: any) {
       console.error("Analysis Error:", err);
-      setError("AI analysis failed. Please try again.");
+      if (err.message?.includes("API key")) {
+        setError(err.message);
+      } else {
+        setError("AI analysis failed. Please try again. Make sure your audio is clear.");
+      }
+    } finally {
       setLoading(false);
     }
   };
@@ -182,7 +176,7 @@ export const VoiceAnalyzerModal: React.FC<VoiceAnalyzerModalProps> = ({ onClose 
                 </button>
               </div>
               <p className="text-gray-400 text-lg px-4">
-                {isRecording ? "Recording... Speak naturally." : `System is ready for language-agnostic detection.`}
+                {isRecording ? "Recording... Speak naturally." : "System is ready for language-agnostic detection."}
               </p>
               {isRecording && <div className="mt-4 flex gap-1 justify-center">
                 {[...Array(5)].map((_, i) => (
@@ -248,9 +242,16 @@ export const VoiceAnalyzerModal: React.FC<VoiceAnalyzerModalProps> = ({ onClose 
         .animate-fade-in-up {
           animation: fadeInUp 0.4s ease-out forwards;
         }
+        .animate-fade-in {
+          animation: fadeIn 0.3s ease-out forwards;
+        }
         @keyframes fadeInUp {
           from { opacity: 0; transform: translateY(20px); }
           to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
         }
       `}</style>
     </div>
