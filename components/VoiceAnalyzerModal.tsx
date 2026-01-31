@@ -30,6 +30,7 @@ export const VoiceAnalyzerModal: React.FC<VoiceAnalyzerModalProps> = ({ onClose 
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const startRecording = async () => {
     try {
@@ -66,6 +67,15 @@ export const VoiceAnalyzerModal: React.FC<VoiceAnalyzerModalProps> = ({ onClose 
     }
   };
 
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setError(null);
+      setAnalysisResult(null);
+      analyzeAudio(file);
+    }
+  };
+
   const analyzeAudio = async (audioBlob: Blob) => {
     setLoading(true);
     setError(null);
@@ -87,7 +97,6 @@ export const VoiceAnalyzerModal: React.FC<VoiceAnalyzerModalProps> = ({ onClose 
 
       const genAI = new GoogleGenerativeAI(apiKey);
       
-      // Use gemini-2.5-flash model
       const model = genAI.getGenerativeModel(
         { model: "gemini-2.5-flash" },
         { apiVersion: 'v1' } 
@@ -116,10 +125,12 @@ Respond ONLY in valid JSON format (no markdown):
   "explanation": "Brief explanation of acoustic features that led to this classification"
 }`;
 
+      const mimeType = audioBlob.type || 'audio/webm';
+      
       const result = await model.generateContent([
         {
           inlineData: {
-            mimeType: 'audio/webm',
+            mimeType: mimeType,
             data: base64Audio
           }
         },
@@ -198,11 +209,25 @@ Respond ONLY in valid JSON format (no markdown):
                 </div>
                 <button 
                   onClick={startRecording} 
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-3 rounded-full font-bold transition-all"
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-3 rounded-full font-bold transition-all mb-3"
                 >
                   Start Voice Analysis
                 </button>
-                <p className="text-gray-400 text-sm mt-4">Click to analyze your voice</p>
+                <p className="text-gray-400 text-xs mb-3">— or —</p>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="audio/*"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-2 rounded-full text-sm font-medium transition-all"
+                >
+                  Upload Audio File
+                </button>
+                <p className="text-gray-500 text-xs mt-3">Supports MP3, WAV, WEBM, etc.</p>
               </>
             )}
           </div>
@@ -228,17 +253,20 @@ Respond ONLY in valid JSON format (no markdown):
                     <div className="text-base font-bold text-white shine-text">
                       {(analysisResult.confidence * 100).toFixed(1)}%
                     </div>
+                    <div className="text-[10px] text-gray-400 mt-0.5">
+                      Score: {analysisResult.confidence.toFixed(3)}
+                    </div>
                   </div>
                 </div>
                 
                 <div className="mb-2 pb-2 border-b border-white/10">
                   <h3 className="font-bold text-[10px] text-gray-400 uppercase mb-0.5">Language</h3>
-                  <div className="text-sm text-indigo-400 font-medium">{analysisResult.language}</div>
+                  <div className="text-[14.3px] text-indigo-400 font-medium">{analysisResult.language}</div>
                 </div>
 
                 <div>
                   <h3 className="font-bold text-[10px] text-gray-400 uppercase mb-0.5">Explanation</h3>
-                  <p className="text-[11px] text-gray-300 leading-relaxed">{analysisResult.explanation}</p>
+                  <p className="text-[11.55px] text-gray-300 leading-relaxed">{analysisResult.explanation}</p>
                 </div>
               </div>
 
